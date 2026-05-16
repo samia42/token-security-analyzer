@@ -1,12 +1,5 @@
-/**
- * Real holder distribution analysis via Ethplorer.
- *
- * Ethplorer exposes a free public key "freekey" that returns total holder count
- * and the top holders for any ERC-20 (rate-limited but no signup needed).
- *
- * Returns the same shape the rest of the analyzer expects:
- *   { riskScore, metrics: { totalHolders, topHolder, top10Percentage, giniCoefficient }, flags, source }
- */
+// Holder distribution via Ethplorer's free public API.
+// `freekey` works without signup but is rate-limited; set ETHPLORER_KEY for prod.
 
 const ETHPLORER_BASE = 'https://api.ethplorer.io';
 const ETHPLORER_KEY = process.env.ETHPLORER_KEY || 'freekey';
@@ -39,10 +32,9 @@ async function fetchTopHolders(tokenAddress, limit = 10) {
   return data.holders || [];
 }
 
+// Approximate Gini over the top-N shares. Not the true network-wide Gini
+// (Ethplorer only gives us the top 10), but a useful concentration proxy.
 function giniFromShares(shares) {
-  // shares = array of percentages (top-N), so this is an approximate Gini
-  // over the visible holders. Not the true network-wide Gini, but a useful
-  // concentration proxy when only top-10 is available.
   const n = shares.length;
   if (n < 2) return 0;
   const sorted = [...shares].sort((a, b) => a - b);

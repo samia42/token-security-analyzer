@@ -1,0 +1,54 @@
+import { ethGetStorageAt, ethCall, decodeAddress } from './etherscanRpc.js';
+
+// keccak256("eip1967.proxy.implementation") - 1
+const EIP_1967_IMPL_SLOT = '0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc';
+// keccak256("eip1967.proxy.beacon") - 1
+const EIP_1967_BEACON_SLOT = '0xa3f0ad74e5423aebfd80d3ef4346578335a9a72aeaee59ff6cb3582b35133d50';
+// keccak256("org.zeppelinos.proxy.implementation") — used by USDC's FiatTokenProxy
+const ZOS_LEGACY_SLOT = '0x7050c9e0f4ca769c69bd3a8ef740bc37934f8e2c036e5a723fd8ee048ed3f8c3';
+
+const IMPLEMENTATION_FN = '0x5c60da1b'; // implementation()
+
+const cache = new Map();
+const TTL_MS = 30_000;
+
+async function readSlot(address, slot) {
+  try {
+    return decodeAddress(await ethGetStorageAt(address, slot));
+  } catch {
+    return null;
+  }
+}
+
+async function resolve(address) {
+  let impl = await readSlot(address, EIP_1967_IMPL_SLOT);
+  if (impl) return { isProxy: true, implementation: impl, kind: 'eip1967' };
+
+  const beacon = await readSlot(address, EIP_1967_BEACON_SLOT);
+  if (beacon) {
+    try {
+      const implFromBeacon = decodeAddress(await ethCall(beacon, IMPLEMENTATION_FN));
+      if (implFromBeacon) return { isProxy: true, implementation: implFromBeacon, kind: 'eip1967-beacon', beacon };
+    } catch { /* fall through */ }
+  }
+
+  impl = await readSlot(address, ZOS_LEGACY_SLOT);
+  if (impl) return { isProxy: true, implementation: impl, kind: 'zeppelinos-legacy' };
+
+  // Last resort: some proxies expose implementation() as a public getter
+  try {
+    impl = decodeAddress(await ethCall(address, IMPLEMENTATION_FN));
+    if (impl) return { isProxy: true, implementation: impl, kind: 'implementation-getter' };
+  } catch { /* not callable */ }
+
+  return { isProxy: false };
+}
+
+export async function resolveImplementation(address) {
+  const key = address.toLowerCase();
+  const hit = cache.get(key);
+  if (hit && hit.expiresAt > Date.now()) return hit.value;
+  const value = await resolve(address);
+  cache.set(key, { value, expiresAt: Date.now() + TTL_MS });
+  return value;
+}

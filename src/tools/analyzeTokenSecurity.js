@@ -94,6 +94,9 @@ export async function analyzeTokenSecurity(tokenAddress) {
           verified: verification.verified,
           contractName: verification.contractName,
           compilerVersion: verification.compilerVersion,
+          isProxy: verification.isProxy || false,
+          proxyKind: verification.proxyKind || null,
+          implementation: verification.implementation || null,
           flag: verification.flag,
           riskAdjustment: getVerificationRiskAdjustment(verification.verified)
         },
@@ -101,6 +104,9 @@ export async function analyzeTokenSecurity(tokenAddress) {
           totalFound: dangerousFuncs.dangerousFunctions?.length || 0,
           functions: dangerousFuncs.dangerousFunctions || [],
           flags: dangerousFuncs.flags || [],
+          confidence: dangerousFuncs.confidence || 'pattern-scan-only',
+          disclaimer: dangerousFuncs.disclaimer,
+          implementationScanned: dangerousFuncs.implementationScanned || null,
           riskAdjustment: getDangerousFunctionsRiskAdjustment(dangerousFuncs.totalRiskScore || 0)
         },
         liquidity: {
