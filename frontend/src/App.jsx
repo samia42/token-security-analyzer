@@ -218,10 +218,10 @@ export default function TokenAnalyzerDashboard() {
               </button>
               {expandedSection === 'contract' && (
                 <div className="section-content">
-                  <div className="status" style={{ color: analysis.analysis.contractVerified.verified ? '#0F6E56' : '#BA7517' }}>
+                  <div className="status" style={{ color: analysis.analysis.contractVerified.error ? '#991b1b' : (analysis.analysis.contractVerified.verified ? '#0F6E56' : '#BA7517') }}>
                     {analysis.analysis.contractVerified.flag}
                   </div>
-                  {analysis.analysis.contractVerified.contractName && (
+                  {!analysis.analysis.contractVerified.error && analysis.analysis.contractVerified.contractName && (
                     <div className="metrics-grid">
                       <div className="metric">
                         <span className="label">Contract Name</span>
@@ -230,6 +230,10 @@ export default function TokenAnalyzerDashboard() {
                       <div className="metric">
                         <span className="label">Compiler</span>
                         <span className="value">{analysis.analysis.contractVerified.compilerVersion}</span>
+                      </div>
+                      <div className="metric">
+                        <span className="label">Verified</span>
+                        <span className="value">{analysis.analysis.contractVerified.verified ? 'Yes' : 'No'}</span>
                       </div>
                     </div>
                   )}
@@ -248,13 +252,17 @@ export default function TokenAnalyzerDashboard() {
               </button>
               {expandedSection === 'functions' && (
                 <div className="section-content">
-                  <div className="status">{analysis.analysis.dangerousFunctions.totalFound} functions found</div>
+                  <div className="status" style={{ color: analysis.analysis.dangerousFunctions.error ? '#991b1b' : '#374151' }}>
+                    {analysis.analysis.dangerousFunctions.error 
+                      ? analysis.analysis.dangerousFunctions.flags[0]
+                      : `${analysis.analysis.dangerousFunctions.totalFound} functions found`}
+                  </div>
                   <div className="flags">
                     {analysis.analysis.dangerousFunctions.flags.map((flag, i) => (
                       <div key={i} className="flag">{flag}</div>
                     ))}
                   </div>
-                  {analysis.analysis.dangerousFunctions.functions.length > 0 && (
+                  {!analysis.analysis.dangerousFunctions.error && analysis.analysis.dangerousFunctions.functions.length > 0 && (
                     <div className="functions-list">
                       {analysis.analysis.dangerousFunctions.functions.map((func, i) => (
                         <div key={i} className="function-item">
@@ -280,7 +288,11 @@ export default function TokenAnalyzerDashboard() {
               </button>
               {expandedSection === 'liquidity' && (
                 <div className="section-content">
-                  {analysis.analysis.liquidity.hasLiquidity ? (
+                  {analysis.analysis.liquidity.error ? (
+                    <div className="status" style={{ color: '#991b1b' }}>
+                      {analysis.analysis.liquidity.flags[0]}
+                    </div>
+                  ) : analysis.analysis.liquidity.hasLiquidity ? (
                     <>
                       <div className="metrics-grid">
                         <div className="metric">

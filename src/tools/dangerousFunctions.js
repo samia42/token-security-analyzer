@@ -1,7 +1,7 @@
 /**
  * Dangerous Functions Scanner
  * Detects malicious patterns in contract code
- * Falls back to mock if API fails
+ * Red flags: selfdestruct, pause, backdoors, etc.
  */
 
 const ETHERSCAN_API_KEY = process.env.ETHERSCAN_KEY || 'demo';
@@ -14,36 +14,45 @@ const DANGEROUS_PATTERNS = {
   blacklist: { patterns: ['blacklist', 'isBlackListed'], severity: 'MEDIUM', risk: 25, description: 'Blacklist function detected' }
 };
 
-// Mock data for known safe tokens
-const MOCK_TOKENS = {
-  '0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48': { name: 'USDC', dangerous: [], risk: 0 },
-  '0x6b175474e89094c44da98b954eedeac495271d0f': { name: 'DAI', dangerous: [], risk: 0 },
-  '0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2': { name: 'WETH', dangerous: [], risk: 0 }
-};
-
 export async function scanDangerousFunctions(contractAddress) {
   try {
-    const url = `https://api.etherscan.io/api?module=contract&action=getsourcecode&address=${contractAddress}&apikey=${ETHERSCAN_API_KEY}`;
+    const url = `https://api.etherscan.io/v2/api?module=contract&action=getsourcecode&address=${contractAddress}&chainid=1&apikey=${ETHERSCAN_API_KEY}`;
     
     const response = await fetch(url, { timeout: 5000 });
     
     if (!response.ok) {
-      console.warn(`Etherscan API error: ${response.status}`);
-      return getMockDangerousFunctions(contractAddress);
+      return {
+        error: true,
+        verified: false,
+        dangerousFunctions: [],
+        totalRiskScore: 0,
+        flags: [`❌ API Error: Could not fetch contract code (${response.status})`]
+      };
     }
     
     const data = await response.json();
 
     if (data.status !== '1' || !data.result || !data.result[0]) {
-      console.warn(`Etherscan status: ${data.status}`);
-      return getMockDangerousFunctions(contractAddress);
+      return {
+        error: true,
+        verified: false,
+        dangerousFunctions: [],
+        totalRiskScore: 0,
+        flags: [`❌ API Error: ${data.message || 'Could not fetch contract'}`]
+      };
     }
 
     const result = data.result[0];
     const sourceCode = result.SourceCode || '';
 
     if (!sourceCode || sourceCode.length === 0) {
-      return getMockDangerousFunctions(contractAddress);
+      return {
+        error: true,
+        verified: false,
+        dangerousFunctions: [],
+        totalRiskScore: 0,
+        flags: [`❌ Contract code not available (not verified on Etherscan)`]
+      };
     }
 
     // Scan for dangerous patterns
@@ -77,33 +86,14 @@ export async function scanDangerousFunctions(contractAddress) {
       flags
     };
   } catch (error) {
-    console.error('Dangerous functions scan error:', error.message);
-    return getMockDangerousFunctions(contractAddress);
-  }
-}
-
-function getMockDangerousFunctions(contractAddress) {
-  const addr = contractAddress.toLowerCase();
-  const mockData = MOCK_TOKENS[addr];
-
-  if (mockData) {
     return {
-      verified: true,
-      contractName: mockData.name,
+      error: true,
+      verified: false,
       dangerousFunctions: [],
       totalRiskScore: 0,
-      flags: ['✅ No dangerous functions detected (mock data)']
+      flags: [`❌ API Error: ${error.message}`]
     };
   }
-
-  // Default for unknown tokens
-  return {
-    verified: false,
-    contractName: null,
-    dangerousFunctions: [],
-    totalRiskScore: 0,
-    flags: ['⚠️ Could not scan (API limit - using mock data)']
-  };
 }
 
 export function getDangerousFunctionsRiskAdjustment(totalRiskScore) {
