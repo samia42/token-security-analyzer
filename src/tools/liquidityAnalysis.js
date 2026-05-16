@@ -3,6 +3,16 @@
  * Real data via DeFiLlama, fallback to realistic pool data for major tokens
  */
 
+async function fetchWithTimeout(url, ms) {
+  const controller = new AbortController();
+  const t = setTimeout(() => controller.abort(), ms);
+  try {
+    return await fetch(url, { signal: controller.signal });
+  } finally {
+    clearTimeout(t);
+  }
+}
+
 export async function analyzeLiquidity(tokenAddress) {
   try {
     // Try real API first
@@ -41,9 +51,7 @@ export async function analyzeLiquidity(tokenAddress) {
 
 async function findTokenPoolsDeFiLlama(tokenAddress) {
   try {
-    const response = await fetch('https://api.llama.fi/protocols/uniswap-v3', {
-      timeout: 5000
-    });
+    const response = await fetchWithTimeout('https://api.llama.fi/protocols/uniswap-v3', 5000);
 
     if (!response.ok) return null;
     const data = await response.json();

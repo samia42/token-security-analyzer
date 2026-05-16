@@ -5,6 +5,17 @@
  */
 
 const ETHERSCAN_API_KEY = process.env.ETHERSCAN_KEY || 'demo';
+const ADDRESS_RE = /^0x[a-fA-F0-9]{40}$/;
+
+async function fetchWithTimeout(url, ms) {
+  const controller = new AbortController();
+  const t = setTimeout(() => controller.abort(), ms);
+  try {
+    return await fetch(url, { signal: controller.signal });
+  } finally {
+    clearTimeout(t);
+  }
+}
 
 const DANGEROUS_PATTERNS = {
   selfdestruct: { patterns: ['selfdestruct', 'suicide'], severity: 'CRITICAL', risk: 50, description: 'Contract can self-destruct' },
@@ -15,10 +26,19 @@ const DANGEROUS_PATTERNS = {
 };
 
 export async function scanDangerousFunctions(contractAddress) {
+  if (!ADDRESS_RE.test(contractAddress)) {
+    return {
+      error: true,
+      verified: false,
+      dangerousFunctions: [],
+      totalRiskScore: 0,
+      flags: ['❌ Invalid address format'],
+    };
+  }
   try {
-    const url = `https://api.etherscan.io/v2/api?module=contract&action=getsourcecode&address=${contractAddress}&chainid=1&apikey=${ETHERSCAN_API_KEY}`;
-    
-    const response = await fetch(url, { timeout: 5000 });
+    const url = `https://api.etherscan.io/v2/api?module=contract&action=getsourcecode&address=${encodeURIComponent(contractAddress)}&chainid=1&apikey=${encodeURIComponent(ETHERSCAN_API_KEY)}`;
+
+    const response = await fetchWithTimeout(url, 5000);
     
     if (!response.ok) {
       return {

@@ -1,150 +1,73 @@
 /**
  * MCP Server for Token Security Analyzer
- * Allows AI agents to discover and use the service via Model Context Protocol
- * 
- * Usage:
- * 1. Run this server: node src/mcp-server.js
- * 2. Claude (or any MCP client) can call tools via MCP protocol
+ *
+ * Uses the official @modelcontextprotocol/sdk with stdio transport.
+ * Compatible with Claude Desktop and any other MCP client.
+ *
+ * Register in Claude Desktop config (~/Library/Application Support/Claude/claude_desktop_config.json):
+ *
+ *   {
+ *     "mcpServers": {
+ *       "token-security": {
+ *         "command": "node",
+ *         "args": ["<absolute-path>/src/mcp-server.js"],
+ *         "env": { "ETHERSCAN_KEY": "<your-key>" }
+ *       }
+ *     }
+ *   }
  */
 
 import 'dotenv/config.js';
+import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import { z } from 'zod';
 import { analyzeTokenSecurity } from './tools/analyzeTokenSecurity.js';
 import { calculateCost } from './middleware/pricingEngine.js';
 
-// Mock payment tracking
-const payments = new Map();
+const ADDRESS_RE = /^0x[a-fA-F0-9]{40}$/;
 
-// Tool definitions for MCP
-const tools = [
+const server = new McpServer({
+  name: 'token-security-analyzer',
+  version: '1.0.0',
+});
+
+server.registerTool(
+  'analyze_token_security',
   {
-    name: 'analyze_token_security',
-    description: 'Analyze token for rug pull risks. Detects: holder concentration, contract verification, dangerous functions, liquidity. Returns risk score 0-100.',
+    title: 'Analyze Token Security',
+    description:
+      'Analyze an ERC-20 token for rug-pull risks. Checks holder concentration, contract verification, dangerous functions, and liquidity. Returns a 0-100 risk score with a breakdown.',
     inputSchema: {
-      type: 'object',
-      properties: {
-        token_address: {
-          type: 'string',
-          description: 'Ethereum token contract address (0x...)'
-        }
-      },
-      required: ['token_address']
-    }
-  }
-];
-
-// Simulate stdio-based MCP communication (simplified)
-class MCPServer {
-  constructor() {
-    this.toolHandlers = {
-      'analyze_token_security': this.handleTokenAnalysis.bind(this)
-    };
-  }
-
-  async handleTokenAnalysis(args) {
-    const { token_address } = args;
-
-    if (!token_address || !token_address.startsWith('0x')) {
-      return {
-        error: 'Invalid token address',
-        success: false
-      };
-    }
-
-    try {
-      // Calculate cost
-      const cost = calculateCost('analyze_token_security');
-      
-      // Mock payment for demo
-      const paymentId = `mcp-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
-      payments.set(paymentId, {
-        amount: cost,
-        currency: 'ETH',
-        status: 'confirmed',
-        timestamp: new Date().toISOString()
-      });
-
-      // Analyze token
-      const analysis = await analyzeTokenSecurity(token_address);
-
-      return {
-        success: true,
-        data: analysis,
-        cost: {
-          amount: cost,
-          currency: 'ETH',
-          reason: 'Etherscan API + computation'
-        },
-        paymentId
-      };
-    } catch (error) {
-      return {
-        error: error.message,
-        success: false
-      };
-    }
-  }
-
-  async processMCPRequest(request) {
-    const { method, params } = request;
-
-    if (method === 'tools/list') {
-      return {
-        tools: tools
-      };
-    }
-
-    if (method === 'tools/call') {
-      const { name, arguments: args } = params;
-      
-      if (!this.toolHandlers[name]) {
-        return {
-          error: `Tool ${name} not found`,
-          success: false
-        };
-      }
-
-      const result = await this.toolHandlers[name](args);
-      return result;
-    }
+      token_address: z
+        .string()
+        .regex(ADDRESS_RE, 'Must be a 0x-prefixed 40-hex-character Ethereum address'),
+    },
+  },
+  async ({ token_address }) => {
+    const cost = calculateCost('analyze_token_security');
+    const analysis = await analyzeTokenSecurity(token_address);
 
     return {
-      error: `Unknown method: ${method}`,
-      success: false
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify(
+            {
+              success: !analysis.error,
+              data: analysis,
+              cost: { amount: cost, currency: 'ETH', reason: 'Etherscan API + computation' },
+            },
+            null,
+            2,
+          ),
+        },
+      ],
     };
-  }
-}
+  },
+);
 
-// Start MCP server
-const mcpServer = new MCPServer();
+const transport = new StdioServerTransport();
+await server.connect(transport);
 
-// Listen on stdin for MCP requests (stdio transport)
-let inputBuffer = '';
-
-process.stdin.on('data', async (chunk) => {
-  inputBuffer += chunk.toString();
-  
-  // Try to parse complete JSON requests
-  const lines = inputBuffer.split('\n');
-  
-  for (let i = 0; i < lines.length - 1; i++) {
-    try {
-      const request = JSON.parse(lines[i]);
-      const response = await mcpServer.processMCPRequest(request);
-      
-      // Send response
-      console.log(JSON.stringify(response));
-    } catch (error) {
-      console.error(JSON.stringify({ error: error.message }));
-    }
-  }
-  
-  // Keep last incomplete line in buffer
-  inputBuffer = lines[lines.length - 1];
-});
-
-process.stdin.on('end', () => {
-  process.exit(0);
-});
-
-console.error('[MCP Server] Token Security Analyzer listening on stdio');
-console.error('[MCP Server] Available tools: analyze_token_security');
+// stdout is reserved for the MCP protocol; log to stderr only.
+console.error('[MCP] Token Security Analyzer ready on stdio');
