@@ -1,191 +1,145 @@
-/**
- * Liquidity Analysis
- * Real data via DeFiLlama, fallback to realistic pool data for major tokens
- */
+// On-chain Uniswap V3 liquidity check via Etherscan eth_call.
+// Probes every (pair × fee tier) combination, reads pair-side reserves,
+// converts to USD. Pool TVL ≈ 2× pair-side reserve (V3 concentrated liquidity
+// means this overstates active depth but matches what DEX trackers show).
 
-async function fetchWithTimeout(url, ms) {
-  const controller = new AbortController();
-  const t = setTimeout(() => controller.abort(), ms);
+import { ethCall, padAddress, padUint, decodeAddress, decodeUint } from './etherscanRpc.js';
+
+// Note: the canonical mainnet factory ends in 1F984, not 113FA as some docs claim.
+const UNISWAP_V3_FACTORY = '0x1F98431c8aD98523631AE4a59f267346ea31F984';
+
+const GET_POOL = '0x1698ee82';    // getPool(address,address,uint24)
+const BALANCE_OF = '0x70a08231';  // balanceOf(address)
+
+const PAIRS = [
+  { addr: '0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2', symbol: 'WETH', decimals: 18, usdPerUnit: null },
+  { addr: '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48', symbol: 'USDC', decimals: 6,  usdPerUnit: 1.0 },
+  { addr: '0xdAC17F958D2ee523a2206206994597C13D831ec7', symbol: 'USDT', decimals: 6,  usdPerUnit: 1.0 },
+  { addr: '0x6B175474E89094C44Da98b954EedeAC495271d0F', symbol: 'DAI',  decimals: 18, usdPerUnit: 1.0 },
+];
+
+const FEES = [
+  { fee: 100,   label: '0.01%' },
+  { fee: 500,   label: '0.05%' },
+  { fee: 3000,  label: '0.30%' },
+  { fee: 10000, label: '1.00%' },
+];
+
+async function getEthPriceUsd() {
+  const KEY = process.env.ETHERSCAN_KEY || 'demo';
   try {
-    return await fetch(url, { signal: controller.signal });
-  } finally {
-    clearTimeout(t);
+    const res = await fetch(`https://api.etherscan.io/v2/api?module=stats&action=ethprice&chainid=1&apikey=${KEY}`);
+    const data = await res.json();
+    const price = parseFloat(data?.result?.ethusd);
+    return Number.isFinite(price) && price > 0 ? price : null;
+  } catch {
+    return null;
   }
 }
 
-export async function analyzeLiquidity(tokenAddress) {
+async function getPool(tokenA, tokenB, fee) {
+  const data = GET_POOL + padAddress(tokenA) + padAddress(tokenB) + padUint(fee);
+  return decodeAddress(await ethCall(UNISWAP_V3_FACTORY, data));
+}
+
+async function balanceOf(token, holder) {
+  const data = BALANCE_OF + padAddress(holder);
+  return decodeUint(await ethCall(token, data));
+}
+
+export async function analyzeLiquidity(address) {
   try {
-    // Try real API first
-    let pools = await findTokenPoolsDeFiLlama(tokenAddress);
-    
-    // If API fails, use verified fallback for known tokens
-    if (!pools || pools.length === 0) {
-      pools = getKnownTokenPools(tokenAddress);
+    const ethPrice = await getEthPriceUsd();
+    const pairs = PAIRS.map((p) => (p.symbol === 'WETH' ? { ...p, usdPerUnit: ethPrice } : p));
+    const tokenLower = address.toLowerCase();
+    const pools = [];
+
+    for (const pair of pairs) {
+      if (pair.addr.toLowerCase() === tokenLower) continue;
+      for (const tier of FEES) {
+        let pool;
+        try { pool = await getPool(address, pair.addr, tier.fee); } catch { continue; }
+        if (!pool) continue;
+
+        let reserveRaw;
+        try { reserveRaw = await balanceOf(pair.addr, pool); } catch { continue; }
+        const reserve = Number(reserveRaw) / 10 ** pair.decimals;
+        const valueUsd = pair.usdPerUnit ? reserve * pair.usdPerUnit : null;
+        const tvlUsd = valueUsd != null ? valueUsd * 2 : null;
+
+        pools.push({
+          address: pool,
+          token0: 'TOKEN',
+          token1: pair.symbol,
+          fee: tier.fee,
+          feeLabel: tier.label,
+          pairReserve: parseFloat(reserve.toFixed(6)),
+          pairValueUsd: valueUsd != null ? Math.round(valueUsd) : null,
+          estimatedTvlUsd: tvlUsd != null ? Math.round(tvlUsd) : null,
+        });
+      }
     }
 
-    if (!pools || pools.length === 0) {
+    if (pools.length === 0) {
       return {
-        error: true,
+        error: false,
         hasLiquidity: false,
         pools: [],
         totalLiquidity: 0,
-        volume24h: 0,
-        riskScore: 0,
-        flags: ['❌ No liquidity data found for this token']
+        ethPriceUsd: ethPrice,
+        riskScore: 30,
+        flags: ['🚩 No Uniswap V3 pools found against WETH/USDC/USDT/DAI'],
       };
     }
 
-    return analyzePoolsData(pools);
+    const total = pools.reduce((sum, p) => sum + (p.estimatedTvlUsd || 0), 0);
+    let riskScore = 0;
+    const flags = [];
+
+    if (total === 0) {
+      riskScore += 30;
+      flags.push('⚠️ Pools exist but reserves are zero / unprice-able');
+    } else if (total < 10_000) {
+      riskScore += 35;
+      flags.push(`🚩 CRITICAL: Very low liquidity ($${total.toLocaleString()})`);
+    } else if (total < 100_000) {
+      riskScore += 25;
+      flags.push(`🚩 LOW: Liquidity under $100k ($${total.toLocaleString()})`);
+    } else if (total < 1_000_000) {
+      riskScore += 10;
+      flags.push(`⚠️ MODERATE: Liquidity under $1M ($${total.toLocaleString()})`);
+    } else {
+      riskScore -= 15;
+      flags.push(`✅ HEALTHY: $${(total / 1_000_000).toFixed(1)}M across ${pools.length} pool(s)`);
+    }
+
+    if (pools.length === 1) {
+      riskScore += 10;
+      flags.push('⚠️ Only 1 pool — concentrated liquidity');
+    } else {
+      flags.push(`✅ ${pools.length} pools (distributed)`);
+    }
+
+    return {
+      error: false,
+      hasLiquidity: total > 0,
+      pools: pools.map((p, i) => ({ rank: i + 1, ...p })),
+      totalLiquidity: total,
+      volume24h: null,
+      ethPriceUsd: ethPrice,
+      riskScore: Math.min(Math.max(riskScore, 0), 40),
+      flags,
+    };
   } catch (error) {
     return {
       error: true,
       hasLiquidity: false,
       pools: [],
       totalLiquidity: 0,
-      volume24h: 0,
       riskScore: 0,
-      flags: [`❌ Error: ${error.message}`]
+      flags: [`❌ Liquidity check failed: ${error.message}`],
     };
   }
-}
-
-async function findTokenPoolsDeFiLlama(tokenAddress) {
-  try {
-    const response = await fetchWithTimeout('https://api.llama.fi/protocols/uniswap-v3', 5000);
-
-    if (!response.ok) return null;
-    const data = await response.json();
-    if (!data.pools) return null;
-
-    const tokenLower = tokenAddress.toLowerCase();
-    const matching = data.pools.filter(p => 
-      JSON.stringify(p).toLowerCase().includes(tokenLower)
-    );
-
-    return matching.slice(0, 5).map(p => ({
-      address: p.pool || '',
-      token0: p.tokens?.[0] || 'TOKEN0',
-      token1: p.tokens?.[1] || 'TOKEN1',
-      fee: p.fee || 0,
-      liquidity: parseFloat(p.tvlUsd) || 0,
-      volume24h: parseFloat(p.volume24h) || 0
-    }));
-  } catch (e) {
-    console.warn('DeFiLlama API unavailable');
-    return null;
-  }
-}
-
-// Known token pools (verified from real data)
-function getKnownTokenPools(tokenAddress) {
-  const addr = tokenAddress.toLowerCase();
-  
-  const knownPools = {
-    // USDC
-    '0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48': [
-      { address: '0x...1', token0: 'USDC', token1: 'WETH', fee: 500, liquidity: 125000000, volume24h: 500000000 },
-      { address: '0x...2', token0: 'USDC', token1: 'USDT', fee: 500, liquidity: 45000000, volume24h: 150000000 }
-    ],
-    // WETH
-    '0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2': [
-      { address: '0x...3', token0: 'WETH', token1: 'USDC', fee: 500, liquidity: 250000000, volume24h: 800000000 },
-      { address: '0x...4', token0: 'WETH', token1: 'DAI', fee: 500, liquidity: 85000000, volume24h: 250000000 }
-    ],
-    // USDT
-    '0xdac17f958d2ee523a2206206994597c13d831ec7': [
-      { address: '0x...5', token0: 'USDT', token1: 'USDC', fee: 500, liquidity: 180000000, volume24h: 600000000 },
-      { address: '0x...6', token0: 'USDT', token1: 'WETH', fee: 3000, liquidity: 92000000, volume24h: 280000000 }
-    ],
-    // DAI
-    '0x6b175474e89094c44da98b954eedeac495271d0f': [
-      { address: '0x...7', token0: 'DAI', token1: 'WETH', fee: 500, liquidity: 98000000, volume24h: 320000000 },
-      { address: '0x...8', token0: 'DAI', token1: 'USDC', fee: 500, liquidity: 67000000, volume24h: 210000000 }
-    ],
-    // LINK
-    '0x514910771af9ca656af840dff83e8264ecf986ca': [
-      { address: '0x...9', token0: 'LINK', token1: 'WETH', fee: 3000, liquidity: 45000000, volume24h: 28000000 }
-    ],
-    // SHIB
-    '0x95ad61b0a150d79219dcf64e1e6cc01f0b64c4ce': [
-      { address: '0x...10', token0: 'SHIB', token1: 'WETH', fee: 10000, liquidity: 12000000, volume24h: 8000000 }
-    ]
-  };
-
-  return knownPools[addr] || null;
-}
-
-function analyzePoolsData(pools) {
-  if (!pools || pools.length === 0) {
-    return {
-      error: true,
-      hasLiquidity: false,
-      pools: [],
-      totalLiquidity: 0,
-      volume24h: 0,
-      riskScore: 0,
-      flags: ['❌ No pool data available']
-    };
-  }
-
-  const totalLiquidity = pools.reduce((sum, p) => sum + (p.liquidity || 0), 0);
-  const totalVolume = pools.reduce((sum, p) => sum + (p.volume24h || 0), 0);
-  let riskScore = 0;
-  const flags = [];
-
-  if (totalLiquidity === 0) {
-    flags.push('❌ No liquidity');
-    riskScore += 40;
-  } else if (totalLiquidity < 10000) {
-    riskScore += 35;
-    flags.push('🚩 CRITICAL: Very low liquidity (<$10k)');
-  } else if (totalLiquidity < 100000) {
-    riskScore += 25;
-    flags.push('🚩 LOW: Low liquidity (<$100k)');
-  } else if (totalLiquidity < 1000000) {
-    riskScore += 10;
-    flags.push('⚠️ MODERATE: Medium liquidity (<$1M)');
-  } else {
-    riskScore -= 15;
-    flags.push('✅ HEALTHY: Good liquidity (>$1M)');
-  }
-
-  const volumeRatio = totalLiquidity > 0 ? totalVolume / totalLiquidity : 0;
-  if (volumeRatio > 2) {
-    riskScore -= 10;
-    flags.push('✅ Strong volume relative to liquidity');
-  } else if (volumeRatio < 0.5 && totalLiquidity > 0) {
-    riskScore += 15;
-    flags.push('🚩 Poor volume - low trading activity');
-  }
-
-  if (pools.length === 1) {
-    riskScore += 10;
-    flags.push('⚠️ Only 1 pool - concentrated liquidity');
-  } else if (pools.length <= 3) {
-    riskScore += 5;
-    flags.push(`⚠️ Limited pools (${pools.length})`);
-  } else {
-    riskScore -= 5;
-    flags.push(`✅ Multiple pools (${pools.length}) - distributed`);
-  }
-
-  return {
-    error: false,
-    hasLiquidity: totalLiquidity > 0,
-    pools: pools.map((p, i) => ({
-      rank: i + 1,
-      address: p.address,
-      token0: p.token0,
-      token1: p.token1,
-      fee: p.fee,
-      liquidity: Math.round(p.liquidity),
-      volume24h: Math.round(p.volume24h)
-    })),
-    totalLiquidity: Math.round(totalLiquidity),
-    volume24h: Math.round(totalVolume),
-    riskScore: Math.min(Math.max(riskScore, 0), 40),
-    flags
-  };
 }
 
 export function getLiquidityRiskAdjustment(riskScore) {

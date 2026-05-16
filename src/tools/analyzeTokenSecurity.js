@@ -1,37 +1,22 @@
-/**
- * Complete Token Security Analyzer
- * Combines: Holder distribution + Contract verification + Dangerous functions + Liquidity
- */
-
 import { checkContractVerified, getVerificationRiskAdjustment } from './contractVerified.js';
 import { scanDangerousFunctions, getDangerousFunctionsRiskAdjustment } from './dangerousFunctions.js';
 import { analyzeLiquidity, getLiquidityRiskAdjustment } from './liquidityAnalysis.js';
 import { analyzeHolders } from './holderAnalysis.js';
 
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-
 export async function analyzeTokenSecurity(tokenAddress) {
   try {
-    // log to stderr — stdout is reserved for the MCP protocol when run as an MCP server
+    // stderr only — stdout is reserved for MCP JSON-RPC framing
     console.error(`\n🔍 Analyzing token: ${tokenAddress}`);
 
-    // Holder analysis (Ethplorer) and liquidity (DeFiLlama) are unrelated to
-    // Etherscan, so they can run in parallel.
-    const [holderResult, liquidity] = await Promise.all([
-      analyzeHolders(tokenAddress).catch((err) => ({ error: err.message })),
-      analyzeLiquidity(tokenAddress),
-    ]);
+    // Ethplorer runs in parallel with the Etherscan-backed work below
+    // (which shares a single throttled queue and must stay sequential).
+    const holderPromise = analyzeHolders(tokenAddress).catch((err) => ({ error: err.message }));
 
-    // Etherscan free tier is 5 req/sec. We make two Etherscan calls per
-    // analysis (contract verified + dangerous functions). Running them
-    // sequentially with a small gap keeps us inside the budget even when
-    // multiple analyses fire back-to-back.
     const verification = await checkContractVerified(tokenAddress);
-    await sleep(250);
     const dangerousFuncs = await scanDangerousFunctions(tokenAddress);
+    const liquidity = await analyzeLiquidity(tokenAddress);
+    const holderResult = await holderPromise;
 
-    // Surface a clear failure mode if Ethplorer rejected the request — better
-    // than silently substituting fake numbers.
     const holderAnalysis = holderResult.error
       ? {
           riskScore: 0,
@@ -41,16 +26,12 @@ export async function analyzeTokenSecurity(tokenAddress) {
         }
       : holderResult;
 
-    // Combine all risk scores
     let finalRiskScore = holderAnalysis.riskScore;
-    
     finalRiskScore += getVerificationRiskAdjustment(verification.verified);
     finalRiskScore += getDangerousFunctionsRiskAdjustment(dangerousFuncs.totalRiskScore || 0);
     finalRiskScore += getLiquidityRiskAdjustment(liquidity.riskScore || 0);
-
     finalRiskScore = Math.min(100, Math.max(0, finalRiskScore));
 
-    // Compile all flags
     const allFlags = [
       ...holderAnalysis.flags,
       verification.flag,
@@ -58,7 +39,6 @@ export async function analyzeTokenSecurity(tokenAddress) {
       ...(liquidity.flags || [])
     ];
 
-    // Final recommendation
     let riskLevel = 'SAFE';
     let recommendation = 'Token appears relatively safe.';
 
@@ -113,6 +93,7 @@ export async function analyzeTokenSecurity(tokenAddress) {
           hasLiquidity: liquidity.hasLiquidity,
           totalLiquidity: liquidity.totalLiquidity,
           volume24h: liquidity.volume24h,
+          ethPriceUsd: liquidity.ethPriceUsd,
           pools: liquidity.pools || [],
           flags: liquidity.flags || [],
           riskAdjustment: getLiquidityRiskAdjustment(liquidity.riskScore || 0)
