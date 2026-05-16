@@ -1,0 +1,24 @@
+{
+  "name": "token-security-analyzer",
+  "version": "1.0.0",
+  "description": "MCP service for token security analysis with HTTP 402 payment",
+  "type": "module",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
+    "test": "node test.js"
+  },
+  "keywords": [
+    "mcp",
+    "blockchain",
+    "security",
+    "http402"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "dotenv": "^16.6.1",
+    "ethers": "^6.13.2"
+  }
+}
