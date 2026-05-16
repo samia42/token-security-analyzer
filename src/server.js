@@ -5,13 +5,34 @@
 
 import 'dotenv/config.js';
 import http from 'http';
+import { randomUUID } from 'crypto';
 import { analyzeTokenSecurity } from './tools/analyzeTokenSecurity.js';
 import { calculateCost, buildHTTP402Response, buildSuccessResponse } from './middleware/pricingEngine.js';
 
 const PORT = process.env.PORT || 3000;
+const ADDRESS_RE = /^0x[a-fA-F0-9]{40}$/;
+const PAYMENT_TTL_MS = 15 * 60 * 1000; // 15 minutes
+const MAX_PAYMENTS = 10_000;
 
-// In-memory payment tracking (for demo)
+// In-memory payment tracking (for demo) — bounded with TTL to avoid memory leak
 const payments = new Map();
+function recordPayment(id, data) {
+  if (payments.size >= MAX_PAYMENTS) {
+    const oldest = payments.keys().next().value;
+    payments.delete(oldest);
+  }
+  payments.set(id, { ...data, expiresAt: Date.now() + PAYMENT_TTL_MS });
+}
+function hasValidPayment(id) {
+  if (!id) return false;
+  const p = payments.get(id);
+  if (!p) return false;
+  if (p.expiresAt < Date.now()) {
+    payments.delete(id);
+    return false;
+  }
+  return true;
+}
 
 const server = http.createServer(async (req, res) => {
   // Enable CORS
@@ -41,8 +62,14 @@ const server = http.createServer(async (req, res) => {
         return;
       }
 
+      if (!ADDRESS_RE.test(tokenAddress)) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'token_address must be a 0x-prefixed 40-hex-char address' }));
+        return;
+      }
+
       const cost = calculateCost('analyze_token_security');
-      const hasPaid = paymentId && payments.has(paymentId);
+      const hasPaid = hasValidPayment(paymentId);
 
       if (!hasPaid) {
         // Return 402 Payment Required
@@ -65,16 +92,29 @@ const server = http.createServer(async (req, res) => {
     // Route 2: Mock payment endpoint
     if (pathname === '/api/pay' && req.method === 'POST') {
       let body = '';
+      let size = 0;
+      const MAX_BODY = 4096; // 4 KB is plenty for {amount, currency, toolName}
+      let aborted = false;
+
       req.on('data', chunk => {
+        size += chunk.length;
+        if (size > MAX_BODY) {
+          aborted = true;
+          res.writeHead(413, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'payload too large' }));
+          req.destroy();
+          return;
+        }
         body += chunk.toString();
       });
 
       req.on('end', () => {
+        if (aborted) return;
         try {
           const paymentData = JSON.parse(body);
-          const paymentId = `payment-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+          const paymentId = `payment-${randomUUID()}`;
 
-          payments.set(paymentId, {
+          recordPayment(paymentId, {
             amount: paymentData.amount,
             currency: paymentData.currency,
             toolName: paymentData.toolName,

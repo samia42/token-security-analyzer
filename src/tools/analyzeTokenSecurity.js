@@ -18,7 +18,8 @@ const MOCK_TOKENS = {
 
 export async function analyzeTokenSecurity(tokenAddress) {
   try {
-    console.log(`\n🔍 Analyzing token: ${tokenAddress}`);
+    // log to stderr — stdout is reserved for the MCP protocol when run as an MCP server
+    console.error(`\n🔍 Analyzing token: ${tokenAddress}`);
 
     // Run all analyses in parallel for speed
     const [holderAnalysis, verification, dangerousFuncs, liquidity] = await Promise.all([
