@@ -1,12 +1,19 @@
 import React, { useState } from 'react';
 import './App.css';
 
+const PRESETS = [
+  { label: 'USDC', addr: '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48', hint: 'stablecoin' },
+  { label: 'LINK', addr: '0x514910771AF9CA656af840dff83E8264EcF986CA', hint: 'clean baseline' },
+  { label: 'SHIB', addr: '0x95aD61b0a150d79219dCF64E1E6Cc01F0B64C4cE', hint: 'thin V3 liquidity' },
+  { label: 'Random', addr: '0x1234567890abcdef1234567890abcdef12345678', hint: 'unverified' },
+];
+
 export default function TokenAnalyzerDashboard() {
   const [tokenAddress, setTokenAddress] = useState('0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48');
   const [loading, setLoading] = useState(false);
   const [analysis, setAnalysis] = useState(null);
   const [error, setError] = useState(null);
-  const [expandedSection, setExpandedSection] = useState(null);
+  const [expandedSection, setExpandedSection] = useState('holders');
 
   const analyzeToken = async () => {
     if (!tokenAddress.trim()) {
@@ -78,18 +85,59 @@ export default function TokenAnalyzerDashboard() {
             type="text"
             value={tokenAddress}
             onChange={(e) => setTokenAddress(e.target.value)}
+            onKeyDown={(e) => { if (e.key === 'Enter' && !loading) analyzeToken(); }}
             placeholder="Enter token contract address (0x...)"
             className="input"
           />
           <button onClick={analyzeToken} disabled={loading} className="btn-primary">
-            {loading ? 'Analyzing...' : 'Analyze Token'}
+            {loading ? (
+              <span className="btn-loading">
+                <span className="spinner" /> Analyzing
+              </span>
+            ) : 'Analyze Token'}
           </button>
+        </div>
+        <div className="presets">
+          <span className="presets-label">Try:</span>
+          {PRESETS.map((p) => (
+            <button
+              key={p.addr}
+              className={`preset-chip ${tokenAddress.toLowerCase() === p.addr.toLowerCase() ? 'active' : ''}`}
+              onClick={() => { setTokenAddress(p.addr); }}
+              disabled={loading}
+              title={p.hint}
+            >
+              {p.label}
+              <span className="preset-hint">{p.hint}</span>
+            </button>
+          ))}
         </div>
       </div>
 
       {error && (
         <div className="error-box">
           <span>❌ {error}</span>
+        </div>
+      )}
+
+      {loading && !analysis && (
+        <div className="loading-card">
+          <div className="loading-row">
+            <span className="loading-step">Fetching holder distribution from Ethplorer</span>
+            <span className="dots"><span /><span /><span /></span>
+          </div>
+          <div className="loading-row">
+            <span className="loading-step">Resolving proxy implementation + source on Etherscan</span>
+            <span className="dots"><span /><span /><span /></span>
+          </div>
+          <div className="loading-row">
+            <span className="loading-step">Scanning verified source for dangerous patterns</span>
+            <span className="dots"><span /><span /><span /></span>
+          </div>
+          <div className="loading-row">
+            <span className="loading-step">Probing Uniswap V3 pools on-chain</span>
+            <span className="dots"><span /><span /><span /></span>
+          </div>
         </div>
       )}
 
@@ -180,24 +228,30 @@ export default function TokenAnalyzerDashboard() {
               </button>
               {expandedSection === 'holders' && (
                 <div className="section-content">
-                  <div className="metrics-grid">
-                    <div className="metric">
-                      <span className="label">Total Holders</span>
-                      <span className="value">{analysis.analysis.holders.metrics.totalHolders.toLocaleString()}</span>
-                    </div>
-                    <div className="metric">
-                      <span className="label">Top Holder</span>
-                      <span className="value">{analysis.analysis.holders.metrics.topHolder.percentage}%</span>
-                    </div>
-                    <div className="metric">
-                      <span className="label">Top 10</span>
-                      <span className="value">{analysis.analysis.holders.metrics.top10Percentage}%</span>
-                    </div>
-                    <div className="metric">
-                      <span className="label">Gini Coeff.</span>
-                      <span className="value">{analysis.analysis.holders.metrics.giniCoefficient}</span>
-                    </div>
-                  </div>
+                  {(() => {
+                    const m = analysis.analysis.holders.metrics;
+                    const fmt = (v, suffix = '') => v == null ? '—' : `${v}${suffix}`;
+                    return (
+                      <div className="metrics-grid">
+                        <div className="metric">
+                          <span className="label">Total Holders</span>
+                          <span className="value">{m.totalHolders == null ? '—' : m.totalHolders.toLocaleString()}</span>
+                        </div>
+                        <div className="metric">
+                          <span className="label">Top Holder</span>
+                          <span className="value">{fmt(m.topHolder?.percentage, '%')}</span>
+                        </div>
+                        <div className="metric">
+                          <span className="label">Top 10</span>
+                          <span className="value">{fmt(m.top10Percentage, '%')}</span>
+                        </div>
+                        <div className="metric">
+                          <span className="label">Gini Coeff.</span>
+                          <span className="value">{fmt(m.giniCoefficient)}</span>
+                        </div>
+                      </div>
+                    );
+                  })()}
                   <div className="flags">
                     {analysis.analysis.holders.flags.map((flag, i) => (
                       <div key={i} className="flag">{flag}</div>
@@ -237,6 +291,21 @@ export default function TokenAnalyzerDashboard() {
                       </div>
                     </div>
                   )}
+                  {analysis.analysis.contractVerified.isProxy && analysis.analysis.contractVerified.implementation && (
+                    <div className="proxy-info">
+                      <div className="proxy-label">Proxy → implementation</div>
+                      <div className="proxy-row">
+                        <span className="proxy-kind">{analysis.analysis.contractVerified.proxyKind}</span>
+                        <span className="proxy-name">{analysis.analysis.contractVerified.implementation.contractName || 'Unknown'}</span>
+                        <span className="proxy-addr">
+                          {analysis.analysis.contractVerified.implementation.address.slice(0, 8)}…{analysis.analysis.contractVerified.implementation.address.slice(-6)}
+                        </span>
+                        <span className="proxy-verified" style={{ color: analysis.analysis.contractVerified.implementation.verified ? '#0F6E56' : '#BA7517' }}>
+                          {analysis.analysis.contractVerified.implementation.verified ? '✓ verified' : '⚠ not verified'}
+                        </span>
+                      </div>
+                    </div>
+                  )}
                 </div>
               )}
             </div>
@@ -253,10 +322,18 @@ export default function TokenAnalyzerDashboard() {
               {expandedSection === 'functions' && (
                 <div className="section-content">
                   <div className="status" style={{ color: analysis.analysis.dangerousFunctions.error ? '#991b1b' : '#374151' }}>
-                    {analysis.analysis.dangerousFunctions.error 
+                    {analysis.analysis.dangerousFunctions.error
                       ? analysis.analysis.dangerousFunctions.flags[0]
-                      : `${analysis.analysis.dangerousFunctions.totalFound} functions found`}
+                      : `${analysis.analysis.dangerousFunctions.totalFound} pattern${analysis.analysis.dangerousFunctions.totalFound === 1 ? '' : 's'} matched`}
                   </div>
+                  {analysis.analysis.dangerousFunctions.confidence && (
+                    <div className="confidence-badge">
+                      <span className="confidence-tag">confidence: {analysis.analysis.dangerousFunctions.confidence}</span>
+                      {analysis.analysis.dangerousFunctions.disclaimer && (
+                        <div className="confidence-text">{analysis.analysis.dangerousFunctions.disclaimer}</div>
+                      )}
+                    </div>
+                  )}
                   <div className="flags">
                     {analysis.analysis.dangerousFunctions.flags.map((flag, i) => (
                       <div key={i} className="flag">{flag}</div>
@@ -297,16 +374,22 @@ export default function TokenAnalyzerDashboard() {
                       <div className="metrics-grid">
                         <div className="metric">
                           <span className="label">Total Liquidity</span>
-                          <span className="value">${(analysis.analysis.liquidity.totalLiquidity / 1000000).toFixed(1)}M</span>
-                        </div>
-                        <div className="metric">
-                          <span className="label">24h Volume</span>
-                          <span className="value">${(analysis.analysis.liquidity.volume24h / 1000000).toFixed(1)}M</span>
+                          <span className="value">
+                            {analysis.analysis.liquidity.totalLiquidity >= 1_000_000
+                              ? `$${(analysis.analysis.liquidity.totalLiquidity / 1_000_000).toFixed(1)}M`
+                              : `$${analysis.analysis.liquidity.totalLiquidity.toLocaleString()}`}
+                          </span>
                         </div>
                         <div className="metric">
                           <span className="label">Pools</span>
                           <span className="value">{analysis.analysis.liquidity.pools.length}</span>
                         </div>
+                        {analysis.analysis.liquidity.ethPriceUsd && (
+                          <div className="metric">
+                            <span className="label">ETH price</span>
+                            <span className="value">${Math.round(analysis.analysis.liquidity.ethPriceUsd).toLocaleString()}</span>
+                          </div>
+                        )}
                       </div>
                       <div className="flags">
                         {analysis.analysis.liquidity.flags.map((flag, i) => (
@@ -318,19 +401,29 @@ export default function TokenAnalyzerDashboard() {
                           <table>
                             <thead>
                               <tr>
-                                <th>Pool</th>
-                                <th>Liquidity</th>
-                                <th>Fee Tier</th>
+                                <th>Pair</th>
+                                <th>Pool TVL</th>
+                                <th>Fee</th>
                               </tr>
                             </thead>
                             <tbody>
-                              {analysis.analysis.liquidity.pools.map((pool, i) => (
-                                <tr key={i}>
-                                  <td>{pool.token0}/{pool.token1}</td>
-                                  <td>${(pool.liquidity / 1000000).toFixed(1)}M</td>
-                                  <td>{pool.feeTier}bps</td>
-                                </tr>
-                              ))}
+                              {analysis.analysis.liquidity.pools.map((pool, i) => {
+                                const tvl = pool.estimatedTvlUsd;
+                                const tvlStr = tvl == null
+                                  ? '—'
+                                  : tvl >= 1_000_000
+                                    ? `$${(tvl / 1_000_000).toFixed(2)}M`
+                                    : tvl >= 1_000
+                                      ? `$${(tvl / 1_000).toFixed(1)}k`
+                                      : `$${tvl.toLocaleString()}`;
+                                return (
+                                  <tr key={i}>
+                                    <td>TOKEN / {pool.token1}</td>
+                                    <td>{tvlStr}</td>
+                                    <td>{pool.feeLabel || `${pool.fee} bps`}</td>
+                                  </tr>
+                                );
+                              })}
                             </tbody>
                           </table>
                         </div>
