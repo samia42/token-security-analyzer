@@ -17,13 +17,49 @@ async function fetchWithTimeout(url, ms) {
   }
 }
 
+// Each pattern matches the *call site* or *declaration site* shape of a
+// dangerous Solidity feature, not just the keyword. This avoids false
+// positives from comments, variable names, or string literals that happen
+// to contain "paused" or "blacklist".
+//
+// We also strip /* */ and // comments before matching (see stripComments).
 const DANGEROUS_PATTERNS = {
-  selfdestruct: { patterns: ['selfdestruct', 'suicide'], severity: 'CRITICAL', risk: 50, description: 'Contract can self-destruct' },
-  pausable: { patterns: ['paused', 'pause\\s*\\('], severity: 'HIGH', risk: 35, description: 'Contract can be paused' },
-  emergencyWithdraw: { patterns: ['emergencyWithdraw', 'drainPool'], severity: 'HIGH', risk: 40, description: 'Emergency withdrawal function' },
-  ownerOnly: { patterns: ['onlyOwner.*transfer', 'onlyOwner.*burn'], severity: 'MEDIUM', risk: 25, description: 'Owner can modify contract' },
-  blacklist: { patterns: ['blacklist', 'isBlackListed'], severity: 'MEDIUM', risk: 25, description: 'Blacklist function detected' }
+  selfdestruct: {
+    patterns: [/\bselfdestruct\s*\(/, /\bsuicide\s*\(/],
+    severity: 'CRITICAL', risk: 50, description: 'Contract can self-destruct'
+  },
+  pausable: {
+    // Pausable modifier / function, or whenNotPaused gate
+    patterns: [/\b(function|modifier)\s+pause\s*\(/, /\bwhenNotPaused\b/, /\b_pause\s*\(\s*\)/],
+    severity: 'HIGH', risk: 35, description: 'Contract can be paused'
+  },
+  emergencyWithdraw: {
+    patterns: [/\bemergencyWithdraw\s*\(/, /\bdrainPool\s*\(/, /\brescueTokens\s*\(/],
+    severity: 'HIGH', risk: 40, description: 'Emergency withdrawal function'
+  },
+  ownerMint: {
+    // onlyOwner-gated mint or arbitrary balance writes
+    patterns: [/onlyOwner[\s\S]{0,200}?function\s+\w*mint\w*\s*\(/i],
+    severity: 'HIGH', risk: 35, description: 'Owner can mint new tokens'
+  },
+  blacklist: {
+    patterns: [/\bblacklist\s*\(/i, /\bisBlackListed\s*\(/, /\baddBlackList\s*\(/i, /\bblacklisted\s*\[/i],
+    severity: 'MEDIUM', risk: 25, description: 'Blacklist function detected'
+  },
+  feeManipulation: {
+    patterns: [/\bsetFee\s*\(/, /\bsetTaxFee\s*\(/, /\bsetSellTax\s*\(/i, /\bsetBuyTax\s*\(/i],
+    severity: 'MEDIUM', risk: 20, description: 'Owner can change transfer fees / taxes'
+  },
 };
+
+// Strip Solidity comments so patterns don't match doc strings or commented-out
+// code. Handles // ... and /* ... */ but not nested block comments (Solidity
+// doesn't allow them anyway).
+function stripComments(src) {
+  return src
+    .replace(/\/\*[\s\S]*?\*\//g, ' ')
+    .replace(/\/\/[^\n]*/g, ' ');
+}
 
 export async function scanDangerousFunctions(contractAddress) {
   if (!ADDRESS_RE.test(contractAddress)) {
@@ -75,22 +111,24 @@ export async function scanDangerousFunctions(contractAddress) {
       };
     }
 
-    // Scan for dangerous patterns
+    // Scan for dangerous patterns. Strip comments first so a `// pause()` in
+    // a doc comment doesn't trigger the pausable flag.
+    const cleanedSource = stripComments(sourceCode);
     const dangerousFunctions = [];
     let totalRisk = 0;
 
     for (const [key, pattern] of Object.entries(DANGEROUS_PATTERNS)) {
-      for (const regex of pattern.patterns) {
-        const found = new RegExp(regex, 'gi').test(sourceCode);
-        if (found) {
-          dangerousFunctions.push({
-            type: key,
-            severity: pattern.severity,
-            risk: pattern.risk,
-            description: pattern.description
-          });
-          totalRisk += pattern.risk;
-        }
+      // Stop at the first matching pattern for a given category — we don't
+      // want to count the same risk twice if multiple variants match.
+      const matched = pattern.patterns.some((regex) => regex.test(cleanedSource));
+      if (matched) {
+        dangerousFunctions.push({
+          type: key,
+          severity: pattern.severity,
+          risk: pattern.risk,
+          description: pattern.description,
+        });
+        totalRisk += pattern.risk;
       }
     }
 
