@@ -52,22 +52,29 @@ export async function analyzeLiquidity(address) {
     const ethPrice = await getEthPriceUsd();
     const pairs = PAIRS.map((p) => (p.symbol === 'WETH' ? { ...p, usdPerUnit: ethPrice } : p));
     const tokenLower = address.toLowerCase();
-    const pools = [];
 
+    // All (pair, fee) combinations run in parallel against the public RPC 
+    const lookups = [];
     for (const pair of pairs) {
       if (pair.addr.toLowerCase() === tokenLower) continue;
       for (const tier of FEES) {
-        let pool;
-        try { pool = await getPool(address, pair.addr, tier.fee); } catch { continue; }
-        if (!pool) continue;
+        lookups.push(
+          getPool(address, pair.addr, tier.fee)
+            .then((pool) => (pool ? { pool, pair, tier } : null))
+            .catch(() => null)
+        );
+      }
+    }
+    const found = (await Promise.all(lookups)).filter(Boolean);
 
+    const pools = (await Promise.all(
+      found.map(async ({ pool, pair, tier }) => {
         let reserveRaw;
-        try { reserveRaw = await balanceOf(pair.addr, pool); } catch { continue; }
+        try { reserveRaw = await balanceOf(pair.addr, pool); } catch { return null; }
         const reserve = Number(reserveRaw) / 10 ** pair.decimals;
         const valueUsd = pair.usdPerUnit ? reserve * pair.usdPerUnit : null;
         const tvlUsd = valueUsd != null ? valueUsd * 2 : null;
-
-        pools.push({
+        return {
           address: pool,
           token0: 'TOKEN',
           token1: pair.symbol,
@@ -76,9 +83,9 @@ export async function analyzeLiquidity(address) {
           pairReserve: parseFloat(reserve.toFixed(6)),
           pairValueUsd: valueUsd != null ? Math.round(valueUsd) : null,
           estimatedTvlUsd: tvlUsd != null ? Math.round(tvlUsd) : null,
-        });
-      }
-    }
+        };
+      })
+    )).filter(Boolean);
 
     if (pools.length === 0) {
       return {

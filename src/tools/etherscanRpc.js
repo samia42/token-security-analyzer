@@ -1,77 +1,55 @@
-// Throttled Etherscan v2 client.
-// All callers share one queue so we don't blow the 5 req/sec ceiling.
 
+const PUBLIC_RPC = process.env.ETH_RPC_URL || 'https://ethereum.publicnode.com';
 const ETHERSCAN_BASE = 'https://api.etherscan.io/v2/api';
 const ETHERSCAN_KEY = process.env.ETHERSCAN_KEY || 'demo';
 const CHAIN_ID = 1;
 
-// Etherscan enforces tighter than the documented 5/sec — 350ms gives headroom.
-const MIN_GAP_MS = 350;
+const MIN_ETHERSCAN_GAP_MS = 350;
+let lastEtherscanAt = 0;
 
-let lastCallAt = 0;
-
-async function throttle() {
-  const wait = lastCallAt + MIN_GAP_MS - Date.now();
+async function throttleEtherscan() {
+  const wait = lastEtherscanAt + MIN_ETHERSCAN_GAP_MS - Date.now();
   if (wait > 0) await new Promise((r) => setTimeout(r, wait));
-  lastCallAt = Date.now();
+  lastEtherscanAt = Date.now();
 }
 
-async function fetchWithTimeout(url, ms) {
+async function fetchWithTimeout(url, options, ms) {
   const controller = new AbortController();
   const t = setTimeout(() => controller.abort(), ms);
   try {
-    return await fetch(url, { signal: controller.signal });
+    return await fetch(url, { ...options, signal: controller.signal });
   } finally {
     clearTimeout(t);
   }
 }
 
-async function etherscanProxyRaw(params) {
-  await throttle();
-  const qs = new URLSearchParams({
-    module: 'proxy',
-    chainid: String(CHAIN_ID),
-    apikey: ETHERSCAN_KEY,
-    ...params,
-  });
-  const res = await fetchWithTimeout(`${ETHERSCAN_BASE}?${qs}`, 8000);
-  if (!res.ok) throw new Error(`Etherscan HTTP ${res.status}`);
+let rpcId = 0;
+async function rpc(method, params) {
+  const res = await fetchWithTimeout(PUBLIC_RPC, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ jsonrpc: '2.0', id: ++rpcId, method, params }),
+  }, 8000);
+  if (!res.ok) throw new Error(`RPC HTTP ${res.status}`);
   const data = await res.json();
-  if (data.error) throw new Error(`Etherscan: ${data.error.message || JSON.stringify(data.error)}`);
-  // Rate-limit on proxy endpoints comes back as {status:"0", message:"NOTOK", result:"..."}
-  if (data.status === '0' && data.message) {
-    const detail = typeof data.result === 'string' ? ` (${data.result})` : '';
-    const err = new Error(`Etherscan: ${data.message}${detail}`);
-    err.isRateLimit = data.message === 'NOTOK';
-    throw err;
-  }
+  if (data.error) throw new Error(`RPC: ${data.error.message || JSON.stringify(data.error)}`);
   return data.result;
 }
 
-async function withRetry(fn) {
-  try {
-    return await fn();
-  } catch (e) {
-    if (!e.isRateLimit) throw e;
-    await new Promise((r) => setTimeout(r, 1500));
-    return fn();
-  }
-}
-
 export async function ethCall(to, data) {
-  return withRetry(() => etherscanProxyRaw({ action: 'eth_call', to, data, tag: 'latest' }));
+  return rpc('eth_call', [{ to, data }, 'latest']);
 }
 
 export async function ethGetStorageAt(address, position) {
-  return withRetry(() => etherscanProxyRaw({ action: 'eth_getStorageAt', address, position, tag: 'latest' }));
+  return rpc('eth_getStorageAt', [address, position, 'latest']);
 }
 
 export async function ethGetCode(address) {
-  return withRetry(() => etherscanProxyRaw({ action: 'eth_getCode', address, tag: 'latest' }));
+  return rpc('eth_getCode', [address, 'latest']);
 }
 
 async function fetchEtherscanSourceRaw(address) {
-  await throttle();
+  await throttleEtherscan();
   const qs = new URLSearchParams({
     module: 'contract',
     action: 'getsourcecode',
@@ -79,7 +57,7 @@ async function fetchEtherscanSourceRaw(address) {
     chainid: String(CHAIN_ID),
     apikey: ETHERSCAN_KEY,
   });
-  const res = await fetchWithTimeout(`${ETHERSCAN_BASE}?${qs}`, 8000);
+  const res = await fetchWithTimeout(`${ETHERSCAN_BASE}?${qs}`, undefined, 8000);
   if (!res.ok) throw new Error(`Etherscan HTTP ${res.status}`);
   const data = await res.json();
   if (data.status !== '1') {
@@ -92,7 +70,13 @@ async function fetchEtherscanSourceRaw(address) {
 }
 
 export async function fetchEtherscanSource(address) {
-  return withRetry(() => fetchEtherscanSourceRaw(address));
+  try {
+    return await fetchEtherscanSourceRaw(address);
+  } catch (e) {
+    if (!e.isRateLimit) throw e;
+    await new Promise((r) => setTimeout(r, 1500));
+    return fetchEtherscanSourceRaw(address);
+  }
 }
 
 export function padAddress(addr) {

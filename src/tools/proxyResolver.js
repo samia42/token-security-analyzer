@@ -21,25 +21,24 @@ async function readSlot(address, slot) {
 }
 
 async function resolve(address) {
-  let impl = await readSlot(address, EIP_1967_IMPL_SLOT);
-  if (impl) return { isProxy: true, implementation: impl, kind: 'eip1967' };
+  const [eip1967, beacon, zos, getter] = await Promise.all([
+    readSlot(address, EIP_1967_IMPL_SLOT),
+    readSlot(address, EIP_1967_BEACON_SLOT),
+    readSlot(address, ZOS_LEGACY_SLOT),
+    ethCall(address, IMPLEMENTATION_FN).then(decodeAddress).catch(() => null),
+  ]);
 
-  const beacon = await readSlot(address, EIP_1967_BEACON_SLOT);
+  if (eip1967) return { isProxy: true, implementation: eip1967, kind: 'eip1967' };
+
   if (beacon) {
-    try {
-      const implFromBeacon = decodeAddress(await ethCall(beacon, IMPLEMENTATION_FN));
-      if (implFromBeacon) return { isProxy: true, implementation: implFromBeacon, kind: 'eip1967-beacon', beacon };
-    } catch { /* fall through */ }
+    const implFromBeacon = await ethCall(beacon, IMPLEMENTATION_FN)
+      .then(decodeAddress)
+      .catch(() => null);
+    if (implFromBeacon) return { isProxy: true, implementation: implFromBeacon, kind: 'eip1967-beacon', beacon };
   }
 
-  impl = await readSlot(address, ZOS_LEGACY_SLOT);
-  if (impl) return { isProxy: true, implementation: impl, kind: 'zeppelinos-legacy' };
-
-  // Last resort: some proxies expose implementation() as a public getter
-  try {
-    impl = decodeAddress(await ethCall(address, IMPLEMENTATION_FN));
-    if (impl) return { isProxy: true, implementation: impl, kind: 'implementation-getter' };
-  } catch { /* not callable */ }
+  if (zos) return { isProxy: true, implementation: zos, kind: 'zeppelinos-legacy' };
+  if (getter) return { isProxy: true, implementation: getter, kind: 'implementation-getter' };
 
   return { isProxy: false };
 }
