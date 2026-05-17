@@ -25,30 +25,10 @@ export default function TokenAnalyzerDashboard() {
     setError(null);
 
     try {
-      // Step 1: Request payment
-      const paymentRes = await fetch('http://localhost:3000/api/pay', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          amount: 0.0002,
-          currency: 'ETH',
-          toolName: 'analyze_token_security'
-        })
-      });
-
-      if (!paymentRes.ok) throw new Error('Payment failed');
-      const payment = await paymentRes.json();
-      const paymentId = payment.paymentId;
-
-      // Step 2: Analyze with payment proof
-      const analysisRes = await fetch(
-        `http://localhost:3000/tools/analyze_token_security?token_address=${tokenAddress}&payment_id=${paymentId}`
-      );
-
-      if (!analysisRes.ok) throw new Error('Analysis failed');
-      const result = await analysisRes.json();
-      
-      setAnalysis(result.data);
+      const r = await fetch(`http://localhost:3000/demo/analyze?token_address=${tokenAddress}`);
+      const body = await r.json();
+      if (!r.ok) throw new Error(body.error || `Server returned ${r.status}`);
+      setAnalysis(body.data);
     } catch (err) {
       setError(err.message || 'Analysis failed');
     } finally {
