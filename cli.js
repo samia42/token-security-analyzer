@@ -7,25 +7,29 @@
 
 import 'dotenv/config.js';
 import { analyzeTokenSecurity } from './src/tools/analyzeTokenSecurity.js';
-import { calculateCost } from './src/middleware/pricingEngine.js';
+import { wrapFetchWithPayment, createSigner, decodeXPaymentResponse } from 'x402-fetch';
 
 async function main() {
   const args = process.argv.slice(2);
-  
-  // Parse arguments
+
   let tokenAddress = null;
   let format = 'pretty';
-  
+  let paid = false;
+  let server = process.env.X402_SERVER_URL || 'http://localhost:3000';
+
   for (let i = 0; i < args.length; i++) {
     if (args[i] === '--token' && args[i + 1]) {
       tokenAddress = args[i + 1];
       i++;
-    }
-    if (args[i] === '--format' && args[i + 1]) {
+    } else if (args[i] === '--format' && args[i + 1]) {
       format = args[i + 1];
       i++;
-    }
-    if (args[i] === '--help' || args[i] === '-h') {
+    } else if (args[i] === '--server' && args[i + 1]) {
+      server = args[i + 1];
+      i++;
+    } else if (args[i] === '--paid') {
+      paid = true;
+    } else if (args[i] === '--help' || args[i] === '-h') {
       printHelp();
       process.exit(0);
     }
@@ -44,19 +48,43 @@ async function main() {
   }
 
   try {
-    console.error('⏳ Analyzing token...\n');
-    
-    const analysis = await analyzeTokenSecurity(tokenAddress);
-    const cost = calculateCost('analyze_token_security');
+    let analysis;
+    let paymentReceipt = null;
+
+    if (paid) {
+      const key = process.env.PRIVATE_KEY;
+      const network = process.env.X402_NETWORK || 'base-sepolia';
+      if (!key) {
+        console.error('❌ --paid requires PRIVATE_KEY env var (a base-sepolia wallet funded with test USDC)');
+        console.error('   Faucet: https://faucet.circle.com/  (select Base Sepolia, USDC)');
+        process.exit(1);
+      }
+      console.error(`💸 Paying via x402 on ${network} → ${server}\n`);
+      const signer = await createSigner(network, key);
+      const fetchWithPay = wrapFetchWithPayment(fetch, signer);
+      const r = await fetchWithPay(`${server}/tools/analyze_token_security?token_address=${tokenAddress}`);
+      const body = await r.json();
+      if (!r.ok) {
+        console.error(`❌ Server returned ${r.status}: ${JSON.stringify(body)}`);
+        process.exit(1);
+      }
+      analysis = body.data;
+      const xpr = r.headers.get('x-payment-response');
+      if (xpr) paymentReceipt = decodeXPaymentResponse(xpr);
+    } else {
+      console.error('⏳ Analyzing token (local mode — no payment)...\n');
+      analysis = await analyzeTokenSecurity(tokenAddress);
+    }
 
     if (format === 'json') {
-      console.log(JSON.stringify({
-        success: true,
-        data: analysis,
-        cost: { amount: cost, currency: 'ETH' }
-      }, null, 2));
+      console.log(JSON.stringify({ success: true, data: analysis, paymentReceipt }, null, 2));
     } else {
-      printPretty(analysis, cost);
+      printPretty(analysis);
+      if (paymentReceipt) {
+        console.log('\n💸 PAYMENT RECEIPT');
+        console.log('────────────────────────────────────────────');
+        console.log(JSON.stringify(paymentReceipt, null, 2));
+      }
     }
   } catch (error) {
     console.error(`❌ Analysis failed: ${error.message}`);
@@ -64,7 +92,7 @@ async function main() {
   }
 }
 
-function printPretty(analysis, cost) {
+function printPretty(analysis) {
   console.log('════════════════════════════════════════════');
   console.log(`🔍 TOKEN SECURITY ANALYSIS`);
   console.log('════════════════════════════════════════════\n');
@@ -123,12 +151,6 @@ function printPretty(analysis, cost) {
   analysis.allFlags.forEach(f => console.log(`   ${f}`));
   console.log();
 
-  // Cost
-  console.log('💳 SERVICE COST:');
-  console.log(`   • Analysis: ${cost} ETH (~$0.50)`);
-  console.log(`   • Prevents: ~$500+ losses`);
-  console.log(`   • ROI: ${(500 / (cost * 2500)).toFixed(0)}x\n`);
-
   console.log('════════════════════════════════════════════\n');
 }
 
@@ -137,15 +159,22 @@ function printHelp() {
 Token Security Analyzer - CLI
 
 USAGE:
-  node cli.js --token <address> [--format json|pretty]
+  node cli.js --token <address> [--format json|pretty] [--paid] [--server <url>]
 
 OPTIONS:
   --token <address>    Token contract address (0x...)
   --format <format>    Output format: json or pretty (default: pretty)
-  --help              Show this help
+  --paid               Pay via x402 (USDC on base-sepolia) against a running server
+  --server <url>       Server URL for --paid mode (default: http://localhost:3000)
+  --help               Show this help
+
+ENV (for --paid):
+  PRIVATE_KEY          0x… private key of a base-sepolia wallet with test USDC
+  X402_NETWORK         network (default: base-sepolia)
 
 EXAMPLES:
   node cli.js --token 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48
+  node cli.js --token 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48 --paid
   node cli.js --token 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48 --format json
 
 KNOWN TOKENS:
