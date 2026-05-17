@@ -9,7 +9,7 @@ const PAY_TO = process.env.PAYMENT_ADDRESS;
 const DEMO_KEY = process.env.DEMO_PRIVATE_KEY;
 const NETWORK = process.env.X402_NETWORK || 'base-sepolia';
 const PRICE = process.env.X402_PRICE || '$0.001';
-const FACILITATOR_URL = process.env.X402_FACILITATOR_URL || 'https://x402.org/facilitator';
+const FACILITATOR_URL = process.env.X402_FACILITATOR_URL || 'https://www.x402.org/facilitator';
 
 const ADDRESS_RE = /^0x[a-fA-F0-9]{40}$/;
 
