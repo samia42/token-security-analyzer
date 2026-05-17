@@ -22,7 +22,6 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
 import { analyzeTokenSecurity } from './tools/analyzeTokenSecurity.js';
-import { calculateCost } from './middleware/pricingEngine.js';
 
 const ADDRESS_RE = /^0x[a-fA-F0-9]{40}$/;
 
@@ -44,7 +43,6 @@ server.registerTool(
     },
   },
   async ({ token_address }) => {
-    const cost = calculateCost('analyze_token_security');
     const analysis = await analyzeTokenSecurity(token_address);
 
     return {
@@ -55,7 +53,6 @@ server.registerTool(
             {
               success: !analysis.error,
               data: analysis,
-              cost: { amount: cost, currency: 'ETH', reason: 'Etherscan API + computation' },
             },
             null,
             2,
