@@ -1,180 +1,105 @@
-/**
- * Token Security Analyzer Server
- * Simple HTTP server (MCP support can be added later)
- */
-
 import 'dotenv/config.js';
-import http from 'http';
-import { randomUUID } from 'crypto';
+import express from 'express';
+import { paymentMiddleware } from 'x402-express';
+import { wrapFetchWithPayment, createSigner } from 'x402-fetch';
 import { analyzeTokenSecurity } from './tools/analyzeTokenSecurity.js';
-import { calculateCost, buildHTTP402Response, buildSuccessResponse } from './middleware/pricingEngine.js';
 
 const PORT = process.env.PORT || 3000;
+const PAY_TO = process.env.PAYMENT_ADDRESS;
+const DEMO_KEY = process.env.DEMO_PRIVATE_KEY;
+const NETWORK = process.env.X402_NETWORK || 'base-sepolia';
+const PRICE = process.env.X402_PRICE || '$0.001';
+const FACILITATOR_URL = process.env.X402_FACILITATOR_URL || 'https://x402.org/facilitator';
+
 const ADDRESS_RE = /^0x[a-fA-F0-9]{40}$/;
-const PAYMENT_TTL_MS = 15 * 60 * 1000; // 15 minutes
-const MAX_PAYMENTS = 10_000;
 
-// In-memory payment tracking (for demo) — bounded with TTL to avoid memory leak
-const payments = new Map();
-function recordPayment(id, data) {
-  if (payments.size >= MAX_PAYMENTS) {
-    const oldest = payments.keys().next().value;
-    payments.delete(oldest);
-  }
-  payments.set(id, { ...data, expiresAt: Date.now() + PAYMENT_TTL_MS });
-}
-function hasValidPayment(id) {
-  if (!id) return false;
-  const p = payments.get(id);
-  if (!p) return false;
-  if (p.expiresAt < Date.now()) {
-    payments.delete(id);
-    return false;
-  }
-  return true;
+if (!PAY_TO || !ADDRESS_RE.test(PAY_TO)) {
+  console.error('PAYMENT_ADDRESS env var is required (0x… address that receives USDC on ' + NETWORK + ')');
+  process.exit(1);
 }
 
-const server = http.createServer(async (req, res) => {
-  // Enable CORS
+const app = express();
+
+app.use((req, res, next) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-Payment');
+  res.setHeader('Access-Control-Expose-Headers', 'X-Payment-Response');
+  if (req.method === 'OPTIONS') return res.sendStatus(200);
+  next();
+});
 
-  if (req.method === 'OPTIONS') {
-    res.writeHead(200);
-    res.end();
-    return;
+app.get('/health', (_req, res) => {
+  res.json({
+    status: 'OK',
+    service: 'Token-Security-Analyzer',
+    version: '2.0.0',
+    payment: { protocol: 'x402', network: NETWORK, price: PRICE, payTo: PAY_TO, facilitator: FACILITATOR_URL },
+    endpoints: [
+      'GET /tools/analyze_token_security?token_address=0x… (x402-gated)',
+      'GET /demo/analyze?token_address=0x… (server pays on your behalf, demo only)',
+      'GET /health',
+    ],
+  });
+});
+
+app.use(paymentMiddleware(
+  PAY_TO,
+  {
+    'GET /tools/analyze_token_security': {
+      price: PRICE,
+      network: NETWORK,
+      config: {
+        description: 'ERC-20 rug-pull risk analysis (verification, dangerous functions, liquidity, holders)',
+      },
+    },
+  },
+  { url: FACILITATOR_URL },
+));
+
+app.get('/tools/analyze_token_security', async (req, res) => {
+  const tokenAddress = req.query.token_address;
+  if (!tokenAddress || !ADDRESS_RE.test(tokenAddress)) {
+    return res.status(400).json({ error: 'token_address must be a 0x-prefixed 40-hex-char address' });
   }
-
-  const url = new URL(req.url, `http://${req.headers.host}`);
-  const pathname = url.pathname;
-  const params = url.searchParams;
-
   try {
-    // Route 1: Analyze token security (with HTTP 402)
-    if (pathname === '/tools/analyze_token_security') {
-      const tokenAddress = params.get('token_address');
-      const paymentId = params.get('payment_id');
-
-      if (!tokenAddress) {
-        res.writeHead(400, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: 'token_address parameter required' }));
-        return;
-      }
-
-      if (!ADDRESS_RE.test(tokenAddress)) {
-        res.writeHead(400, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: 'token_address must be a 0x-prefixed 40-hex-char address' }));
-        return;
-      }
-
-      const cost = calculateCost('analyze_token_security');
-      const hasPaid = hasValidPayment(paymentId);
-
-      if (!hasPaid) {
-        // Return 402 Payment Required
-        const response402 = buildHTTP402Response('analyze_token_security', cost);
-        res.writeHead(response402.status, response402.headers);
-        res.end(JSON.stringify(response402.body));
-        return;
-      }
-
-      // Payment confirmed - execute analysis
-      console.log(`✅ Payment confirmed (${paymentId}). Analyzing token: ${tokenAddress}`);
-      const analysis = await analyzeTokenSecurity(tokenAddress);
-
-      const successResponse = buildSuccessResponse('analyze_token_security', analysis, cost);
-      res.writeHead(successResponse.status, successResponse.headers);
-      res.end(JSON.stringify(successResponse.body, null, 2));
-      return;
-    }
-
-    // Route 2: Mock payment endpoint
-    if (pathname === '/api/pay' && req.method === 'POST') {
-      let body = '';
-      let size = 0;
-      const MAX_BODY = 4096; // 4 KB is plenty for {amount, currency, toolName}
-      let aborted = false;
-
-      req.on('data', chunk => {
-        size += chunk.length;
-        if (size > MAX_BODY) {
-          aborted = true;
-          res.writeHead(413, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ error: 'payload too large' }));
-          req.destroy();
-          return;
-        }
-        body += chunk.toString();
-      });
-
-      req.on('end', () => {
-        if (aborted) return;
-        try {
-          const paymentData = JSON.parse(body);
-          const paymentId = `payment-${randomUUID()}`;
-
-          recordPayment(paymentId, {
-            amount: paymentData.amount,
-            currency: paymentData.currency,
-            toolName: paymentData.toolName,
-            status: 'confirmed',
-            timestamp: new Date().toISOString()
-          });
-
-          console.log(`💰 [PAYMENT] Received ${paymentData.amount} ${paymentData.currency} for ${paymentData.toolName}`);
-
-          res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({
-            success: true,
-            paymentId,
-            status: 'confirmed',
-            message: 'Payment accepted (mock). You can now call the service.'
-          }, null, 2));
-        } catch (error) {
-          res.writeHead(400, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ error: 'Invalid payment data' }));
-        }
-      });
-      return;
-    }
-
-    // Route 3: Health check
-    if (pathname === '/health') {
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({
-        status: 'OK',
-        service: 'Token-Security-Analyzer',
-        version: '1.0.0',
-        endpoints: [
-          'GET /tools/analyze_token_security?token_address=0x...',
-          'POST /api/pay (body: {amount, currency, toolName})',
-          'GET /health'
-        ]
-      }, null, 2));
-      return;
-    }
-
-    // 404
-    res.writeHead(404, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ error: 'Not found' }));
-
-  } catch (error) {
-    console.error('Server error:', error);
-    res.writeHead(500, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ error: error.message }));
+    const data = await analyzeTokenSecurity(tokenAddress);
+    res.json({ success: true, tool: 'analyze_token_security', data });
+  } catch (err) {
+    console.error('analysis error:', err);
+    res.status(500).json({ error: err.message });
   }
 });
 
-server.listen(PORT, () => {
-  console.log(`\n🚀 Token Security Analyzer running on http://localhost:${PORT}`);
-  console.log(`\n📋 Available endpoints:`);
-  console.log(`   GET  http://localhost:${PORT}/health`);
-  console.log(`   GET  http://localhost:${PORT}/tools/analyze_token_security?token_address=0x...`);
-  console.log(`   POST http://localhost:${PORT}/api/pay`);
-  console.log(`\n💡 Example:`);
-  console.log(`   1. curl http://localhost:${PORT}/tools/analyze_token_security?token_address=0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48`);
-  console.log(`   2. Get 402 with X-Price header`);
-  console.log(`   3. curl -X POST http://localhost:${PORT}/api/pay -H "Content-Type: application/json" -d '{...}'`);
-  console.log(`   4. Re-run step 1 with payment_id to get analysis\n`);
+if (DEMO_KEY) {
+  const signer = await createSigner(NETWORK, DEMO_KEY);
+  const fetchWithPay = wrapFetchWithPayment(fetch, signer);
+  const baseUrl = `http://localhost:${PORT}`;
+
+  app.get('/demo/analyze', async (req, res) => {
+    const tokenAddress = req.query.token_address;
+    if (!tokenAddress || !ADDRESS_RE.test(tokenAddress)) {
+      return res.status(400).json({ error: 'token_address must be a 0x-prefixed 40-hex-char address' });
+    }
+    try {
+      const r = await fetchWithPay(`${baseUrl}/tools/analyze_token_security?token_address=${tokenAddress}`);
+      const body = await r.json();
+      const paymentResponse = r.headers.get('x-payment-response');
+      res.status(r.status).json({ ...body, paymentResponse });
+    } catch (err) {
+      console.error('demo proxy error:', err);
+      res.status(502).json({ error: err.message });
+    }
+  });
+} else {
+  app.get('/demo/analyze', (_req, res) => {
+    res.status(503).json({ error: 'DEMO_PRIVATE_KEY not set — set it in .env to enable the dashboard demo proxy' });
+  });
+}
+
+app.listen(PORT, () => {
+  console.log(`\nToken Security Analyzer on http://localhost:${PORT}`);
+  console.log(`  paid:   GET /tools/analyze_token_security?token_address=0x…   (${PRICE} USDC on ${NETWORK})`);
+  console.log(`  demo:   GET /demo/analyze?token_address=0x…                   (${DEMO_KEY ? 'server pays' : 'disabled — set DEMO_PRIVATE_KEY'})`);
+  console.log(`  health: GET /health\n`);
 });

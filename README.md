@@ -8,7 +8,7 @@ An ERC-20 rug-pull risk analyzer for Ethereum mainnet. Exposes the same analysis
 | **HTTP service** | Web dashboards, scripts, integrations | `node src/server.js` |
 | **CLI** | Humans at a terminal | `node cli.js --token 0x...` |
 
-The HTTP service uses an **HTTP 402** payment-required flow (mock for now), so a service ID, a price, and the unlock flow are part of the protocol — the same shape a real x402-style paid service would take.
+The HTTP service is gated by **real [x402](https://x402.org) payments** — USDC on Base Sepolia, settled by the Coinbase-hosted facilitator at `x402.org/facilitator`. Clients hit the endpoint, get `402 Payment Required` with the payment requirements, sign an EIP-3009 transfer authorization with a viem wallet, replay the request with an `X-Payment` header, and the facilitator verifies + settles the transfer before the analyzer runs.
 
 ---
 
@@ -39,9 +39,7 @@ The score is bounded `[0, 100]`. Bands:
 token-aggregator/
 ├── src/
 │   ├── mcp-server.js              MCP server over stdio (@modelcontextprotocol/sdk)
-│   ├── server.js                  HTTP server with /api/pay and /tools/analyze_token_security
-│   ├── middleware/
-│   │   └── pricingEngine.js       HTTP 402 response + cost calculator
+│   ├── server.js                  Express + x402-express; serves /tools/* and /demo/analyze
 │   └── tools/
 │       ├── analyzeTokenSecurity.js  Orchestrator — combines the four signals
 │       ├── holderAnalysis.js        Ethplorer-backed real holder data
@@ -116,24 +114,36 @@ Fully quit Claude Desktop (⌘Q) and relaunch. The 🔌 tools icon in a new chat
 
 ---
 
-## HTTP 402 flow (for the HTTP service)
+## x402 payment flow
 
-The HTTP service intentionally refuses to analyze without a payment ID. The flow is:
+The HTTP route `/tools/analyze_token_security` is wrapped in `x402-express` middleware. There is no separate `/api/pay` endpoint — the protocol handles payment in the same request:
 
 ```
 GET /tools/analyze_token_security?token_address=0x...
   → 402 Payment Required
-     X-Price: 0.0002
-     X-Price-Currency: ETH
+     body: { x402Version, accepts: [{ scheme:"exact", network:"base-sepolia",
+                                      maxAmountRequired, asset (USDC), payTo, … }] }
 
-POST /api/pay  body: { amount, currency, toolName }
-  → 200 { paymentId: "payment-<uuid>" }
+(client signs an EIP-3009 transferWithAuthorization for that exact amount/recipient using viem)
 
-GET /tools/analyze_token_security?token_address=0x...&payment_id=<paymentId>
-  → 200 { success: true, data: { riskScore, riskLevel, analysis, allFlags, ... } }
+GET /tools/analyze_token_security?token_address=0x...
+     X-Payment: <base64 signed payload>
+  → middleware POSTs the payload to the facilitator → /verify → /settle (USDC moves on-chain)
+  → 200 { success: true, data: { riskScore, riskLevel, analysis, allFlags, … } }
+     X-Payment-Response: <base64 settlement receipt incl. tx hash>
 ```
 
-The current payment endpoint is a **mock** — it accepts any body and returns a confirmed paymentId. The 15-minute TTL, bounded payment map, UUID IDs, and 4 KB body cap are real (designed not to leak memory or be brute-forced), so swapping in a real on-chain verifier is mostly a one-function change in `src/server.js`.
+**Three ways to drive that flow:**
+
+| Caller | How |
+|---|---|
+| **CLI (real x402)** | `PRIVATE_KEY=0x... node cli.js --token 0x... --paid` — uses `x402-fetch` with a viem signer. Prints the settlement receipt (tx hash on Base Sepolia). |
+| **Dashboard** | Hits `/demo/analyze`, a server-side proxy that internally calls `/tools/...` with `x402-fetch` and the server's own `DEMO_PRIVATE_KEY`. Real x402 happens server-side so the browser doesn't need MetaMask. |
+| **Direct curl** | `curl http://localhost:3000/tools/analyze_token_security?token_address=0x...` returns the raw `402` body for inspection. |
+
+**Funding a test wallet:** generate a private key, send it to `https://faucet.circle.com/` (select Base Sepolia → USDC) plus a small drip of Base Sepolia ETH for the EIP-3009 sender from `https://www.alchemy.com/faucets/base-sepolia`. The facilitator settles for you; users don't need ETH on every call once the wallet is funded.
+
+The facilitator URL, network, price, and `payTo` wallet are all `.env` knobs (`X402_FACILITATOR_URL`, `X402_NETWORK`, `X402_PRICE`, `PAYMENT_ADDRESS`). Flip `X402_NETWORK=base` for mainnet — everything else stays the same.
 
 ---
 
@@ -201,9 +211,7 @@ Beyond the MCP rewrite and the accuracy fixes, the build addressed a handful of 
 
 | Issue | Fix |
 |---|---|
-| `Math.random + Date.now + substr(2,9)` paymentId → trivially guessable | `crypto.randomUUID()` |
-| Unbounded payments map → memory leak | `MAX_PAYMENTS=10000` + 15-minute TTL |
-| `/api/pay` accepted arbitrary body size | 4 KB cap with HTTP 413 |
+| Mock `/api/pay` with guessable IDs and an unbounded in-memory map | Replaced wholesale with real x402 (`x402-express`) settling USDC via the Coinbase facilitator |
 | `token_address` not validated in HTTP route | Regex check + `encodeURIComponent` |
 | `.env` (with real API key) committed despite `.gitignore` | Untracked. **Key in commit `46b67e6` of the public repo still needs rotation.** |
 | `.env` had `DEMO_MODE=trueETHERSCAN_KEY=...` on one concatenated line | Cleaned and replaced with a proper `.env.example` |
@@ -214,7 +222,7 @@ Beyond the MCP rewrite and the accuracy fixes, the build addressed a handful of 
 
 - **Etherscan free tier (100 k req/day, 5 req/s, enforced jittery).** A single analysis costs ~20 calls and takes ~12-15 s with the 350 ms throttle. Concurrent analyses serialize through the same queue. Upgrade to a paid Etherscan plan, or run multiple keys, for production throughput.
 - **Ethplorer's `freekey` is rate-limited.** For production, [register for a free Ethplorer key](https://ethplorer.io/wallet/#register) and set `ETHPLORER_KEY` in `.env`.
-- **Mock payments.** `/api/pay` accepts anything; replace with on-chain verification (e.g. `ethers.js` checking a tx hash against `PAYMENT_ADDRESS` and amount) before charging real money.
+- **Testnet by default.** The default config settles real USDC on Base Sepolia (free, faucet-funded). Flip `X402_NETWORK=base` and fund the wallet with real USDC to switch to mainnet — no other code change.
 - **Burn-address concentration looks like rug risk.** SHIB's top holder is `0xdead…` holding 41 % — the analyzer flags it as concentration. Detecting known burn addresses is a follow-up.
 - **Pattern scanner won't catch obfuscated dangerous functions** (delegate calls into a hidden implementation, function names shortened in assembly, etc.). It's a pre-screen, not a formal audit — the response says so explicitly via `confidence: "pattern-scan-only"`.
 - **Liquidity covers Uniswap V3 only.** Tokens whose liquidity lives on V2, Sushiswap, Curve, or other L1/L2 chains will look thinner than they really are. SHIB on V3 alone is ~$340k, while its real cross-DEX depth is much larger.
